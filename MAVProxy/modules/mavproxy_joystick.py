@@ -11,9 +11,8 @@ from time import sleep
 
 mpstate = None
 
-class module_state(object):
-    def __init__(self):
-        self.js = None
+from MAVProxy.modules.lib import mp_module
+
 
 '''
 A map of joystick identifiers to channels and scalings.
@@ -32,13 +31,38 @@ joymap = {
      None,
      (2, 500, 1500),
      (5, 500, 1500)],
-    
+
+    '*SAILI Simulator*':
+    # Same as above but is reporting a different name
+    # http://www.hobbyking.com/hobbyking/store/__13597__USB_Simulator_Cable_XTR_AeroFly_FMS.html
+    # has 4 usable axes. The last 4 are binary switches and not PWM outputs.
+    # Axis, Scaling Number, 
+    [(0, 500, 1500),
+     (3, 500, 1500),
+     (1, 500, 1500),
+     (2, 500, 1500),
+     (4, 500, 1500),
+     (5, 500, 1500),
+     (6, 500, 1500),
+     (7, 500, 1500)],
+
     'Sony PLAYSTATION(R)3 Controller':
     # only 4 axes usable. This assumes mode 1
     [(2, 500,  1500),
      (1, -500,  1500),
      (3, -500, 1000),
      (0, -500,  1500)],
+
+    'Microsoft X-Box 360 pad':
+    # This is for a USB cabled X-Box 360 controller
+    # only 4 axes usable. Left and right trigger are ch5 and ch4.
+    # This assumes mode 1
+    [(3, 500,  1500),
+     (1, -500,  1500),
+     (4, -500, 1500),
+     (0, 500,  1500),
+     (2, 500, 1500),
+     (5, 500, 1500)],
 
     'GREAT PLANES InterLink Elite':
     # 4 axes usable
@@ -60,72 +84,77 @@ joymap = {
      None,
      None,
      None,
-     (3, 500,  1500)]
+     (3, 500,  1500)],
+
+    # This supports a Spektrum DX7s with the USB Adapter from:
+    # http://www.amazon.com/gp/product/B000RO7JAI/ref=oh_aui_detailpage_o03_s00?ie=UTF8&psc=1
+    'WAILLY PPM TO USB Adapter':
+    [(1, 570, 1500), # Roll
+     (2, 614, 1500), # Pitch
+     (0, 770, 1500), # Throttle
+     (5, 571, 1500), # Yaw
+     None,
+     None],
+
+    # This supports a ADC cheap ebay USB controller
+    # sold as a "FMS Simulator" joystick
+    'ADC':
+    [(0, -500, 1500), # Roll
+     (1, -500, 1500), # Pitch
+     (2, -500, 1500), # Throttle
+     (4, 500, 1500), # Yaw
+     None,
+     None]
 }
 
-def idle_task():
-    '''called in idle time'''
-    state = mpstate.joystick_state
-    if state.js is None:
-        return
-    for e in pygame.event.get(): # iterate over event stack
-        #the following is somewhat custom for the specific joystick model:
-        override = mpstate.rc_state.override[:]
-        for i in range(len(state.map)):
-            m = state.map[i]
-            if m is None:
+class JSModule(mp_module.MPModule):
+    def __init__(self, mpstate):
+        super(JSModule, self).__init__(mpstate, "joystick", "joystick aircraft control")
+        self.js = None
+
+        #initialize joystick, if available
+        pygame.init()
+        pygame.joystick.init() # main joystick device system
+
+        for i in range(pygame.joystick.get_count()):
+            print("Trying joystick %u" % i)
+            try:
+                j = pygame.joystick.Joystick(i)
+                j.init() # init instance
+                name = j.get_name()
+                print('joystick found: ' + name)
+                for jtype in joymap:
+                    if fnmatch.fnmatch(name, jtype):
+                        print("Matched type '%s'" % jtype)
+                        print '%u axes available' % j.get_numaxes()
+                        self.js = j
+                        self.num_axes = j.get_numaxes()
+                        self.map = joymap[jtype]
+                        break
+            except pygame.error:
                 continue
-            (axis, mul, add) = m
-            if axis >= state.num_axes:
-                continue
-            v = int(state.js.get_axis(axis)*mul + add)
-            v = max(min(v, 2000), 1000)
-            override[i] = v
-        if override != mpstate.rc_state.override:
-            mpstate.rc_state.override = override
-            mpstate.rc_state.override_period.force()
 
-def name():
-    '''return module name'''
-    return "joystick"
+    def idle_task(self):
+        '''called in idle time'''
+        if self.js is None:
+            return
+        for e in pygame.event.get(): # iterate over event stack
+            #the following is somewhat custom for the specific joystick model:
+            override = self.module('rc').override[:]
+            for i in range(len(self.map)):
+                m = self.map[i]
+                if m is None:
+                    continue
+                (axis, mul, add) = m
+                if axis >= self.num_axes:
+                    continue
+                v = int(self.js.get_axis(axis)*mul + add)
+                v = max(min(v, 2000), 1000)
+                override[i] = v
+            if override != self.module('rc').override:
+                self.module('rc').override = override
+                self.module('rc').override_period.force()
 
-def description():
-    '''return module description'''
-    return "joystick aircraft control"
-
-def init(_mpstate):
+def init(mpstate):
     '''initialise module'''
-    global mpstate
-    mpstate = _mpstate
-    state = module_state()
-    mpstate.joystick_state = state
-    
-    #initialize joystick, if available
-    pygame.init()
-    pygame.joystick.init() # main joystick device system
-
-    for i in range(pygame.joystick.get_count()):
-        print("Trying joystick %u" % i)
-        try:
-            j = pygame.joystick.Joystick(i)
-            j.init() # init instance
-            name = j.get_name()
-            print 'joystick found: ' + name
-            for jtype in joymap:
-                if fnmatch.fnmatch(name, jtype):
-                    print "Matched type '%s'" % jtype
-                    print '%u axes available' % j.get_numaxes()
-                    state.js = j
-                    state.num_axes = j.get_numaxes()
-                    state.map = joymap[jtype]
-                    break
-        except pygame.error:
-            continue    
-
-if __name__ == "__main__":
-    class dummy(object):
-        def __init__(self):
-            pass
-    d = dummy()
-    init(d)
-    
+    return JSModule(mpstate)

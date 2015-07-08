@@ -20,15 +20,17 @@ from MAVProxy.modules.mavproxy_map import mp_elevation
 from MAVProxy.modules.mavproxy_map import mp_tile
 from MAVProxy.modules.lib import mp_util
 from MAVProxy.modules.lib.mp_menu import *
-from MAVProxy.modules.mavproxy_map import mp_widgets
+from MAVProxy.modules.lib import mp_widgets
 
 
 class SlipObject:
     '''an object to display on the map'''
-    def __init__(self, key, layer):
+    def __init__(self, key, layer, popup_menu=None):
         self.key = key
         self.layer = layer
         self.latlon = None
+        self.popup_menu = popup_menu
+        self.hidden = False
 
     def clip(self, px, py, w, h, img):
         '''clip an area for display on the map'''
@@ -68,17 +70,84 @@ class SlipObject:
         '''
         return None
 
+    def selection_info(self):
+        '''extra selection information sent when object is selected'''
+        return None
+
+    def bounds(self):
+        '''return bounding box or None'''
+        return None
+
+    def set_hidden(self, hidden):
+        '''set hidden attribute'''
+        self.hidden = hidden
+
+class SlipLabel(SlipObject):
+    '''a text label to display on the map'''
+    def __init__(self, key, point, label, layer, colour):
+        SlipObject.__init__(self, key, layer)
+        self.point = point
+        self.colour = colour
+        self.label = label
+
+    def draw_label(self, img, pixmapper):
+        pix1 = pixmapper(self.point)
+        cv.PutText(img, self.label, pix1, cv.InitFont(cv.CV_FONT_HERSHEY_SIMPLEX, 1.0,1.0), self.colour)
+
+    def draw(self, img, pixmapper, bounds):
+        if self.hidden:
+            return
+        self.draw_label(img, pixmapper)
+
+    def bounds(self):
+        '''return bounding box'''
+        if self.hidden:
+            return None
+        return (self.point[0], self.point[1], 0, 0)
+
+class SlipCircle(SlipObject):
+    '''a circle to display on the map'''
+    def __init__(self, key, layer, latlon, radius, color, linewidth, popup_menu=None):
+        SlipObject.__init__(self, key, layer, popup_menu=popup_menu)
+        self.latlon = latlon
+        self.radius = float(radius)
+        self.color = color
+        self.linewidth = linewidth
+
+    def draw(self, img, pixmapper, bounds):
+        if self.hidden:
+            return
+        center_px = pixmapper(self.latlon)
+        #figure out pixels per meter
+        ref_pt = (self.latlon[0] + 1.0, self.latlon[1])
+        dis = mp_util.gps_distance(self.latlon[0], self.latlon[1], ref_pt[0], ref_pt[1])
+        ref_px = pixmapper(ref_pt)
+        dis_px = math.sqrt(float(center_px[1] - ref_px[1]) ** 2.0)
+        pixels_per_meter = dis_px / dis
+
+        cv.Circle(img, center_px, int(self.radius * pixels_per_meter), self.color, self.linewidth)
+
+    def bounds(self):
+        '''return bounding box'''
+        if self.hidden:
+            return None
+        return (self.latlon[0], self.latlon[1], 0, 0)
+
 class SlipPolygon(SlipObject):
     '''a polygon to display on the map'''
-    def __init__(self, key, points, layer, colour, linewidth):
-        SlipObject.__init__(self, key, layer, )
+    def __init__(self, key, points, layer, colour, linewidth, popup_menu=None):
+        SlipObject.__init__(self, key, layer, popup_menu=popup_menu)
         self.points = points
         self.colour = colour
         self.linewidth = linewidth
         self._bounds = mp_util.polygon_bounds(self.points)
+        self._pix_points = []
+        self._selected_vertex = None
 
     def bounds(self):
         '''return bounding box'''
+        if self.hidden:
+            return None
         return self._bounds
 
     def draw_line(self, img, pixmapper, pt1, pt2, colour, linewidth):
@@ -87,13 +156,22 @@ class SlipPolygon(SlipObject):
         pix2 = pixmapper(pt2)
         clipped = cv.ClipLine((img.width, img.height), pix1, pix2)
         if clipped is None:
+            if len(self._pix_points) == 0:
+                self._pix_points.append(None)
+            self._pix_points.append(None)
             return
         (pix1, pix2) = clipped
         cv.Line(img, pix1, pix2, colour, linewidth)
         cv.Circle(img, pix2, linewidth*2, colour)
+        if len(self._pix_points) == 0:
+            self._pix_points.append(pix1)
+        self._pix_points.append(pix2)
 
     def draw(self, img, pixmapper, bounds):
         '''draw a polygon on the image'''
+        if self.hidden:
+            return
+        self._pix_points = []
         for i in range(len(self.points)-1):
             if len(self.points[i]) > 2:
                 colour = self.points[i][2]
@@ -101,6 +179,25 @@ class SlipPolygon(SlipObject):
                 colour = self.colour
             self.draw_line(img, pixmapper, self.points[i], self.points[i+1],
                            colour, self.linewidth)
+
+    def clicked(self, px, py):
+        '''see if the polygon has been clicked on.
+        Consider it clicked if the pixel is within 6 of the point
+        '''
+        if self.hidden:
+            return None
+        for i in range(len(self._pix_points)):
+            if self._pix_points[i] is None:
+                continue
+            (pixx,pixy) = self._pix_points[i]
+            if abs(px - pixx) < 6 and abs(py - pixy) < 6:
+                self._selected_vertex = i
+                return math.sqrt((px - pixx)**2 + (py - pixy)**2)
+        return None
+
+    def selection_info(self):
+        '''extra selection information sent when object is selected'''
+        return self._selected_vertex
 
 
 class SlipGrid(SlipObject):
@@ -110,10 +207,6 @@ class SlipGrid(SlipObject):
         self.colour = colour
         self.linewidth = linewidth
 
-    def bounds(self):
-        '''return bounding box'''
-        return None
-
     def draw_line(self, img, pixmapper, pt1, pt2, colour, linewidth):
         '''draw a line on the image'''
         pix1 = pixmapper(pt1)
@@ -127,6 +220,8 @@ class SlipGrid(SlipObject):
 
     def draw(self, img, pixmapper, bounds):
         '''draw a polygon on the image'''
+        if self.hidden:
+            return
 	(x,y,w,h) = bounds
         spacing = 1000
         while True:
@@ -149,13 +244,12 @@ class SlipGrid(SlipObject):
             pos3 = mp_util.gps_newpos(pos1[0], pos1[1], 90, 3*count*spacing)
             self.draw_line(img, pixmapper, pos1, pos3, self.colour, self.linewidth)
 
-
-
 class SlipThumbnail(SlipObject):
     '''a thumbnail to display on the map'''
     def __init__(self, key, latlon, layer, img,
-                 border_colour=None, border_width=0):
-        SlipObject.__init__(self, key, layer)
+                 border_colour=None, border_width=0,
+                 popup_menu=None):
+        SlipObject.__init__(self, key, layer, popup_menu=popup_menu)
         self.latlon = latlon
         self._img = None
         self.imgstr = img.tostring()
@@ -168,6 +262,8 @@ class SlipThumbnail(SlipObject):
 
     def bounds(self):
         '''return bounding box'''
+        if self.hidden:
+            return None
         return (self.latlon[0], self.latlon[1], 0, 0)
 
     def img(self):
@@ -184,6 +280,8 @@ class SlipThumbnail(SlipObject):
 
     def draw(self, img, pixmapper, bounds):
         '''draw the thumbnail on the image'''
+        if self.hidden:
+            return
         thumb = self.img()
         (px,py) = pixmapper(self.latlon)
 
@@ -207,11 +305,12 @@ class SlipThumbnail(SlipObject):
 
     def clicked(self, px, py):
         '''see if the image has been clicked on'''
+        if self.hidden:
+            return None
         if (abs(px - self.posx) > self.width/2 or
             abs(py - self.posy) > self.height/2):
             return None
         return math.sqrt((px-self.posx)**2 + (py-self.posy)**2)
-
 
 class SlipTrail:
     '''trail information for a moving icon'''
@@ -242,8 +341,8 @@ class SlipTrail:
 class SlipIcon(SlipThumbnail):
     '''a icon to display on the map'''
     def __init__(self, key, latlon, img, layer=1, rotation=0,
-                 follow=False, trail=None):
-        SlipThumbnail.__init__(self, key, latlon, layer, img)
+                 follow=False, trail=None, popup_menu=None):
+        SlipThumbnail.__init__(self, key, latlon, layer, img, popup_menu=popup_menu)
         self.rotation = rotation
         self.follow = follow
         self.trail = trail
@@ -265,6 +364,9 @@ class SlipIcon(SlipThumbnail):
 
     def draw(self, img, pixmapper, bounds):
         '''draw the icon on the image'''
+
+        if self.hidden:
+            return
 
         if self.trail is not None:
             self.trail.draw(img, pixmapper, bounds)
@@ -319,6 +421,12 @@ class SlipRemoveObject:
     def __init__(self, key):
         self.key = key
 
+class SlipHideObject:
+    '''hide an object by key'''
+    def __init__(self, key, hide):
+        self.key = key
+        self.hide = hide
+
 
 class SlipInformation:
     '''an object to display in the information box'''
@@ -333,6 +441,11 @@ class SlipInformation:
         '''update the information'''
         pass
 
+class SlipDefaultPopup:
+    '''an object to hold a default popup menu'''
+    def __init__(self, popup, combine=False):
+        self.popup = popup
+        self.combine = combine
 
 class SlipInfoImage(SlipInformation):
     '''an image to display in the info box'''
@@ -404,9 +517,11 @@ class SlipInfoText(SlipInformation):
 
 class SlipObjectSelection:
     '''description of a object under the cursor during an event'''
-    def __init__(self, objkey, distance):
+    def __init__(self, objkey, distance, layer, extra_info=None):
         self.distance = distance
         self.objkey = objkey
+        self.layer = layer
+        self.extra_info = extra_info
 
 class SlipEvent:
     '''an event sent to the parent.
@@ -429,6 +544,12 @@ class SlipKeyEvent(SlipEvent):
     '''a key event sent to the parent'''
     def __init__(self, latlon, event, selected):
         SlipEvent.__init__(self, latlon, event, selected)
+
+class SlipMenuEvent(SlipEvent):
+    '''a menu event sent to the parent'''
+    def __init__(self, latlon, event, selected, menuitem):
+        SlipEvent.__init__(self, latlon, event, selected)
+        self.menuitem = menuitem
 
 
 class MPSlipMap():
@@ -479,6 +600,7 @@ class MPSlipMap():
 
     def child_task(self):
         '''child process - this holds all the GUI elements'''
+        mp_util.child_close_fds()
         import wx
         state = self
 
@@ -512,6 +634,14 @@ class MPSlipMap():
         '''add or update an object on the map'''
         self.object_queue.put(obj)
 
+    def remove_object(self, key):
+        '''remove an object on the map by key'''
+        self.object_queue.put(SlipRemoveObject(key))
+
+    def hide_object(self, key, hide=True):
+        '''hide an object on the map by key'''
+        self.object_queue.put(SlipHideObject(key, hide))
+
     def set_position(self, key, latlon, layer=None, rotation=0):
         '''move an object on the map'''
         self.object_queue.put(SlipPosition(key, latlon, layer, rotation))
@@ -543,7 +673,6 @@ class MPSlipMap():
 
 
 import wx
-from PIL import Image
 
 class MPSlipMapFrame(wx.Frame):
     """ The main frame of the viewer
@@ -554,6 +683,11 @@ class MPSlipMapFrame(wx.Frame):
         state.frame = self
         state.grid = True
         state.follow = True
+        state.download = True
+        state.popup_object = None
+        state.popup_latlon = None
+        state.popup_started = False
+        state.default_popup = None
         state.panel = MPSlipMapPanel(self, state)
         self.Bind(wx.EVT_IDLE, self.on_idle)
         self.Bind(wx.EVT_SIZE, state.panel.on_size)
@@ -567,6 +701,8 @@ class MPSlipMapFrame(wx.Frame):
                                                     MPMenuItem('Goto\tCtrl+P', 'Goto Position', 'gotoPosition'),
                                                     MPMenuItem('Brightness +\tCtrl+B', 'Increase Brightness', 'increaseBrightness'),
                                                     MPMenuItem('Brightness -\tCtrl+Shift+B', 'Decrease Brightness', 'decreaseBrightness'),
+                                                    MPMenuCheckbox('Download Tiles\tCtrl+D', 'Enable Tile Download', 'toggleDownload',
+                                                                   checked=state.download),
                                                     MPMenuRadio('Service', 'Select map service',
                                                                 returnkey='setService',
                                                                 selected=state.mt.get_service(),
@@ -577,13 +713,34 @@ class MPSlipMapFrame(wx.Frame):
     def on_menu(self, event):
         '''handle menu selection'''
         state = self.state
+        # see if it is a popup menu
+        if state.popup_object is not None:
+            obj = state.popup_object
+            ret = obj.popup_menu.find_selected(event)
+            if ret is not None:
+                ret.call_handler()
+                state.event_queue.put(SlipMenuEvent(state.popup_latlon, event,
+                                                    [SlipObjectSelection(obj.key, 0, obj.layer, obj.selection_info())],
+                                                    ret))
+                state.popup_object = None
+                state.popup_latlon = None
+        if state.default_popup is not None:
+            ret = state.default_popup.popup.find_selected(event)
+            if ret is not None:
+                ret.call_handler()
+                state.event_queue.put(SlipMenuEvent(state.popup_latlon, event, [], ret))
+            
+        # otherwise a normal menu
         ret = self.menu.find_selected(event)
         if ret is None:
             return
+        ret.call_handler()
         if ret.returnkey == 'toggleGrid':
             state.grid = ret.IsChecked()
         elif ret.returnkey == 'toggleFollow':
             state.follow = ret.IsChecked()
+        elif ret.returnkey == 'toggleDownload':
+            state.download = ret.IsChecked()
         elif ret.returnkey == 'setService':
             state.mt.set_service(ret.get_choice())
         elif ret.returnkey == 'gotoPosition':
@@ -662,6 +819,9 @@ class MPSlipMapFrame(wx.Frame):
                         self.follow(object)
                     state.need_redraw = True
 
+            if isinstance(obj, SlipDefaultPopup):
+                state.default_popup = obj
+
             if isinstance(obj, SlipInformation):
                 # see if its a existing one or a new one
                 if obj.key in state.info:
@@ -691,8 +851,16 @@ class MPSlipMapFrame(wx.Frame):
 
             if isinstance(obj, SlipRemoveObject):
                 # remove an object by key
-                if obj.layer in state.layers:
-                    state.layers.pop(obj.layer)
+                for layer in state.layers:
+                    if obj.key in state.layers[layer]:
+                        state.layers[layer].pop(obj.key)
+                state.need_redraw = True
+
+            if isinstance(obj, SlipHideObject):
+                # hide an object by key
+                for layer in state.layers:
+                    if obj.key in state.layers[layer]:
+                        state.layers[layer][obj.key].set_hidden(obj.hide)
                 state.need_redraw = True
         
         if obj is None:
@@ -823,8 +991,12 @@ class MPSlipMapPanel(wx.Panel):
             newtext += 'Cursor: %f %f (%s)' % (lat, lon, mp_util.latlon_to_grid((lat, lon)))
             if state.elevation:
                 alt = self.ElevationMap.GetElevation(lat, lon)
-                newtext += ' %.1fm' % alt
-        pending = state.mt.tiles_pending()
+                if alt is not None:
+                    newtext += ' %.1fm' % alt
+        state.mt.set_download(state.download)
+        pending = 0
+        if state.download:
+            pending = state.mt.tiles_pending()
         if pending:
             newtext += ' Map Downloading %u ' % pending
         if alt == -1:
@@ -949,12 +1121,32 @@ class MPSlipMapPanel(wx.Panel):
         (px, py) = pos
         for layer in state.layers:
             for key in state.layers[layer]:
-                distance = state.layers[layer][key].clicked(px, py)
+                obj = state.layers[layer][key]
+                distance = obj.clicked(px, py)
                 if distance is not None:
-                    selected.append(SlipObjectSelection(key, distance))
+                    selected.append(SlipObjectSelection(key, distance, layer, extra_info=obj.selection_info()))
         selected.sort(key=lambda c: c.distance)
         return selected
 
+    def show_popup(self, selected, pos):
+        '''show popup menu for an object'''
+        state = self.state
+        if selected.popup_menu is not None:
+            import copy
+            popup_menu = selected.popup_menu
+            if state.default_popup.popup is not None and state.default_popup.combine:
+                popup_menu = copy.deepcopy(popup_menu)
+                popup_menu.add(MPMenuSeparator())
+                popup_menu.combine(state.default_popup.popup)
+            wx_menu = popup_menu.wx_menu()
+            state.frame.PopupMenu(wx_menu, pos)
+
+    def show_default_popup(self, pos):
+        '''show default popup menu'''
+        state = self.state
+        if state.default_popup.popup is not None:
+            wx_menu = state.default_popup.popup.wx_menu()
+            state.frame.PopupMenu(wx_menu, pos)
 
     def on_mouse(self, event):
         '''handle mouse events'''
@@ -971,8 +1163,25 @@ class MPSlipMapPanel(wx.Panel):
             latlon = self.coordinates(pos.x, pos.y)
             selected = self.selected_objects(pos)
             state.event_queue.put(SlipMouseEvent(latlon, event, selected))
+            if event.RightDown():
+                state.popup_object = None
+                state.popup_latlon = None
+                if len(selected) > 0:
+                    obj = state.layers[selected[0].layer][selected[0].objkey]
+                    if obj.popup_menu is not None:
+                        state.popup_object = obj
+                        state.popup_latlon = latlon
+                        self.show_popup(obj, pos)
+                        state.popup_started = True
+                if not state.popup_started and state.default_popup is not None:
+                    state.popup_latlon = latlon
+                    self.show_default_popup(pos)
+                    state.popup_started = True
 
-        if event.LeftDown():
+        if not event.ButtonIsDown(wx.MOUSE_BTN_RIGHT):
+            state.popup_started = False
+
+        if event.LeftDown() or event.RightDown():
             self.mouse_down = pos
             self.last_click_pos = self.click_pos
             self.click_pos = self.coordinates(pos.x, pos.y)
@@ -980,18 +1189,20 @@ class MPSlipMapPanel(wx.Panel):
         if event.Dragging() and event.ButtonIsDown(wx.MOUSE_BTN_LEFT):
             # drag map to new position
             newpos = pos
-            dx = (self.mouse_down.x - newpos.x)
-            dy = -(self.mouse_down.y - newpos.y)
-            pdist = math.sqrt(dx**2 + dy**2)
-            if pdist > state.drag_step:
-                bearing = math.degrees(math.atan2(dx, dy))
-                distance = (state.ground_width/float(state.width)) * pdist
-                newlatlon = mp_util.gps_newpos(state.lat, state.lon, bearing, distance)
-                (state.lat, state.lon) = newlatlon
-                self.mouse_down = newpos
-                self.redraw_map()
+            if self.mouse_down and newpos:
+                dx = (self.mouse_down.x - newpos.x)
+                dy = -(self.mouse_down.y - newpos.y)
+                pdist = math.sqrt(dx**2 + dy**2)
+                if pdist > state.drag_step:
+                    bearing = math.degrees(math.atan2(dx, dy))
+                    distance = (state.ground_width/float(state.width)) * pdist
+                    newlatlon = mp_util.gps_newpos(state.lat, state.lon, bearing, distance)
+                    (state.lat, state.lon) = newlatlon
+                    self.mouse_down = newpos
+                    self.redraw_map()
 
     def clear_thumbnails(self):
+        '''clear all thumbnails from the map'''
         state = self.state
         for l in state.layers:
             keys = state.layers[l].keys()[:]

@@ -4,77 +4,98 @@
 import time, os
 from pymavlink import mavutil
 
-def name():
-    '''return module name'''
-    return "calibration"
+from MAVProxy.modules.lib import mp_module
 
-def description():
-    '''return module description'''
-    return "calibration handling"
+class CalibrationModule(mp_module.MPModule):
+    def __init__(self, mpstate):
+        super(CalibrationModule, self).__init__(mpstate, "calibration")
+        self.add_command('ground', self.cmd_ground,   'do a ground start')
+        self.add_command('level', self.cmd_level,    'set level on a multicopter')
+        self.add_command('compassmot', self.cmd_compassmot, 'do compass/motor interference calibration')
+        self.add_command('calpress', self.cmd_calpressure,'calibrate pressure sensors')
+        self.add_command('accelcal', self.cmd_accelcal, 'do 3D accelerometer calibration')
+        self.add_command('gyrocal', self.cmd_gyrocal, 'do gyro calibration')
+        self.add_command('ahrstrim', self.cmd_ahrstrim, 'do AHRS trim')
+        self.accelcal_count = -1
+        self.accelcal_wait_enter = False
+        self.compassmot_running = False
+        self.empty_input_count = 0
 
-def init(_mpstate):
+    def cmd_ground(self, args):
+        '''do a ground start mode'''
+        self.master.calibrate_imu()
+
+    def cmd_level(self, args):
+        '''run a accel level'''
+        self.master.calibrate_level()
+
+    def cmd_accelcal(self, args):
+        '''do a full 3D accel calibration'''
+        mav = self.master
+        # ack the APM to begin 3D calibration of accelerometers
+        mav.mav.command_long_send(mav.target_system, mav.target_component,
+                                  mavutil.mavlink.MAV_CMD_PREFLIGHT_CALIBRATION, 0,
+                                  0, 0, 0, 0, 1, 0, 0)
+        self.accelcal_count = 0
+        self.accelcal_wait_enter = False
+
+    def cmd_gyrocal(self, args):
+        '''do a full gyro calibration'''
+        mav = self.master
+        mav.mav.command_long_send(mav.target_system, mav.target_component,
+                                  mavutil.mavlink.MAV_CMD_PREFLIGHT_CALIBRATION, 0,
+                                  1, 0, 0, 0, 0, 0, 0)
+
+    def cmd_ahrstrim(self, args):
+        '''do a AHRS trim'''
+        mav = self.master
+        mav.mav.command_long_send(mav.target_system, mav.target_component,
+                                  mavutil.mavlink.MAV_CMD_PREFLIGHT_CALIBRATION, 0,
+                                  0, 0, 0, 0, 2, 0, 0)
+
+    def mavlink_packet(self, m):
+        '''handle mavlink packets'''
+        if self.accelcal_count != -1:
+            if m.get_type() == 'STATUSTEXT':
+                # handle accelcal packet
+                text = str(m.text)
+                if text.startswith('Place '):
+                    self.accelcal_wait_enter = True
+                    self.empty_input_count = self.mpstate.empty_input_count
+
+    def idle_task(self):
+        '''handle mavlink packets'''
+        if self.accelcal_count != -1:
+            if self.accelcal_wait_enter and self.empty_input_count != self.mpstate.empty_input_count:
+                self.accelcal_wait_enter = False
+                self.accelcal_count += 1
+                # tell the APM that user has done as requested
+                self.master.mav.command_ack_send(self.accelcal_count, 1)
+                if self.accelcal_count >= 6:
+                    self.accelcal_count = -1
+
+        if self.compassmot_running:
+            if self.mpstate.empty_input_count != self.empty_input_count:
+                # user has hit enter, stop the process
+                    self.compassmot_running = False
+                    print("sending stop")
+                    self.master.mav.command_ack_send(0, 1)
+
+    
+    def cmd_compassmot(self, args):
+        '''do a compass/motor interference calibration'''
+        mav = self.master
+        print("compassmot starting")
+        mav.mav.command_long_send(mav.target_system, mav.target_component,
+                                  mavutil.mavlink.MAV_CMD_PREFLIGHT_CALIBRATION, 0,
+                                  0, 0, 0, 0, 0, 1, 0)
+        self.compassmot_running = True
+        self.empty_input_count = self.mpstate.empty_input_count
+
+    def cmd_calpressure(self, args):
+        '''calibrate pressure sensors'''
+        self.master.calibrate_pressure()
+
+def init(mpstate):
     '''initialise module'''
-    global mpstate
-    mpstate = _mpstate
-    mpstate.command_map['ground']     = (cmd_ground,   'do a ground start')
-    mpstate.command_map['level']      = (cmd_level,    'set level on a multicopter')
-    mpstate.command_map['compassmot'] = (cmd_compassmot, 'do compass/motor interference calibration')
-    mpstate.command_map['calpress']   = (cmd_calpressure,'calibrate pressure sensors')
-    mpstate.command_map['accelcal']   = (cmd_accelcal, 'do 3D accelerometer calibration')
-
-def cmd_ground(args):
-    '''do a ground start mode'''
-    mpstate.master().calibrate_imu()
-
-def cmd_level(args):
-    '''run a accel level'''
-    mpstate.master().calibrate_level()
-
-def cmd_accelcal(args):
-    '''do a full 3D accel calibration'''
-    mav = mpstate.master()
-    # ack the APM to begin 3D calibration of accelerometers
-    mav.mav.command_long_send(mav.target_system, mav.target_component,
-                              mavutil.mavlink.MAV_CMD_PREFLIGHT_CALIBRATION, 0,
-                              0, 0, 0, 0, 1, 0, 0)
-    count = 0
-    # we expect 6 messages and acks
-    while count < 6:
-        m = mav.recv_match(type='STATUSTEXT', blocking=True)
-        text = str(m.text)
-        if not text.startswith('Place '):
-            continue
-        # wait for user to hit enter
-        mpstate.rl.line = None
-        while mpstate.rl.line is None:
-            time.sleep(0.1)
-        mpstate.rl.line = None
-        count += 1
-        # tell the APM that we've done as requested
-        mav.mav.command_ack_send(count, 1)
-
-
-def cmd_compassmot(args):
-    '''do a compass/motor interference calibration'''
-    mav = mpstate.master()
-    print("compassmot starting")
-    mav.mav.command_long_send(mav.target_system, mav.target_component,
-                              mavutil.mavlink.MAV_CMD_PREFLIGHT_CALIBRATION, 0,
-                              0, 0, 0, 0, 0, 1, 0)
-    mpstate.rl.line = None
-    while True:
-        m = mav.recv_match(type=['COMMAND_ACK','COMPASSMOT_STATUS'], blocking=False)
-        if m is not None:
-            print(m)
-            if m.get_type() == 'COMMAND_ACK':
-                break
-        if mpstate.rl.line is not None:
-            # user has hit enter, stop the process
-            mav.mav.command_ack_send(0, 1)
-            break
-        time.sleep(0.01)
-    print("compassmot done")
-
-def cmd_calpressure(args):
-    '''calibrate pressure sensors'''
-    mpstate.master().calibrate_pressure()
+    return CalibrationModule(mpstate)

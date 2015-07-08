@@ -14,7 +14,8 @@ except ImportError:
     import cv
 
 from MAVProxy.modules.lib import mp_util
-from MAVProxy.modules.mavproxy_map import mp_widgets
+from MAVProxy.modules.lib import mp_widgets
+from MAVProxy.modules.lib.mp_menu import *
 
 
 class MPImageData:
@@ -54,6 +55,11 @@ class MPImagePopupMenu:
     def __init__(self, menu):
         self.menu = menu
 
+class MPImageNewSize:
+    '''reported to parent when window size changes'''
+    def __init__(self, size):
+        self.size = size
+
 class MPImage():
     '''
     a generic image viewer widget for use in MP tools
@@ -66,7 +72,9 @@ class MPImage():
                  can_drag = False,
                  mouse_events = False,
                  key_events = False,
-                 auto_size = False):
+                 auto_size = False,
+                 report_size_changes = False,
+                 daemon = False):
         import multiprocessing
 
         self.title = title
@@ -77,19 +85,28 @@ class MPImage():
         self.mouse_events = mouse_events
         self.key_events = key_events
         self.auto_size = auto_size
+        self.report_size_changes = report_size_changes
         self.menu = None
         self.popup_menu = None
-        
+
         self.in_queue = multiprocessing.Queue()
         self.out_queue = multiprocessing.Queue()
+
+        self.default_menu = MPMenuSubMenu('View',
+                                          items=[MPMenuItem('Fit Window', 'Fit Window', 'fitWindow'),
+                                                 MPMenuItem('Full Zoom',  'Full Zoom', 'fullSize')])
+
         self.child = multiprocessing.Process(target=self.child_task)
+        self.child.daemon = daemon
         self.child.start()
+        self.set_popup_menu(self.default_menu)
 
     def child_task(self):
         '''child process - this holds all the GUI elements'''
+        mp_util.child_close_fds()
         import wx
         state = self
-        
+
         self.app = wx.PySimpleApp()
         self.app.frame = MPImageFrame(state=self)
         self.app.frame.Show()
@@ -146,7 +163,7 @@ class MPImage():
         '''check for events, returning one event'''
         if self.out_queue.qsize():
             return self.out_queue.get()
-        return None            
+        return None
 
     def events(self):
         '''check for events a list of events'''
@@ -155,11 +172,14 @@ class MPImage():
             ret.append(self.out_queue.get())
         return ret
 
-from PIL import Image
+    def terminate(self):
+        '''terminate child process'''
+        self.child.terminate()
+        self.child.join()
 
 class MPImageFrame(wx.Frame):
     """ The main frame of the viewer
-    """    
+    """
     def __init__(self, state):
         wx.Frame.__init__(self, None, wx.ID_ANY, state.title)
         self.state = state
@@ -170,7 +190,7 @@ class MPImageFrame(wx.Frame):
         self.SetSizer(self.sizer)
         self.Bind(wx.EVT_IDLE, self.on_idle)
         self.Bind(wx.EVT_SIZE, state.panel.on_size)
-        
+
     def on_idle(self, event):
         '''prevent the main loop spinning too fast'''
         state = self.state
@@ -178,14 +198,14 @@ class MPImageFrame(wx.Frame):
 
 class MPImagePanel(wx.Panel):
     """ The image panel
-    """    
+    """
     def __init__(self, parent, state):
         wx.Panel.__init__(self, parent)
         self.frame = parent
         self.state = state
         self.img = None
         self.redraw_timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, self.on_redraw_timer, self.redraw_timer)        
+        self.Bind(wx.EVT_TIMER, self.on_redraw_timer, self.redraw_timer)
         self.Bind(wx.EVT_SET_FOCUS, self.on_focus)
         self.redraw_timer.Start(100)
 
@@ -196,6 +216,8 @@ class MPImagePanel(wx.Panel):
         self.popup_menu = None
         self.wx_popup_menu = None
         self.popup_pos = None
+        self.last_size = None
+        self.done_PIL_warning = False
         state.brightness = 1.0
 
         # dragpos is the top left position in image coordinates
@@ -210,6 +232,8 @@ class MPImagePanel(wx.Panel):
         self.mainSizer.Add(self.imagePanel, flag=wx.TOP|wx.LEFT|wx.GROW, border=0)
         if state.mouse_events:
             self.imagePanel.Bind(wx.EVT_MOUSE_EVENTS, self.on_event)
+        else:
+            self.imagePanel.Bind(wx.EVT_MOUSE_EVENTS, self.on_mouse_event)
         if state.key_events:
             self.imagePanel.Bind(wx.EVT_KEY_DOWN, self.on_event)
         else:
@@ -265,9 +289,17 @@ class MPImagePanel(wx.Panel):
         scaled_image = scaled_image.GetSubImage(rect);
         scaled_image = scaled_image.Rescale(int(rect.width*self.zoom), int(rect.height*self.zoom))
         if state.brightness != 1.0:
-            pimg = mp_util.wxToPIL(scaled_image)
-            pimg = Image.eval(pimg, lambda x: int(x * state.brightness))
-            scaled_image = mp_util.PILTowx(pimg)
+            try:
+                from PIL import Image
+                pimg = mp_util.wxToPIL(scaled_image)
+                pimg = Image.eval(pimg, lambda x: int(x * state.brightness))
+                scaled_image = mp_util.PILTowx(pimg)
+            except Exception:
+                if not self.done_PIL_warning:
+                    print("Please install PIL for brightness control")
+                    self.done_PIL_warning = True
+                # ignore lack of PIL library
+                pass
         self.imagePanel.set_image(scaled_image)
         self.need_redraw = False
 
@@ -281,7 +313,7 @@ class MPImagePanel(wx.Panel):
         print h.heap()
         '''
 
-        
+
     def on_redraw_timer(self, event):
         '''the redraw timer ensures we show new map tiles as they
         are downloaded'''
@@ -317,7 +349,14 @@ class MPImagePanel(wx.Panel):
 
     def on_size(self, event):
         '''handle window size changes'''
+        state = self.state
         self.need_redraw = True
+        if state.report_size_changes:
+            # tell owner the new size
+            size = self.frame.GetSize()
+            if size != self.last_size:
+                self.last_size = size
+                state.out_queue.put(MPImageNewSize(size))
 
     def limit_dragpos(self):
         '''limit dragpos to sane values'''
@@ -325,6 +364,8 @@ class MPImagePanel(wx.Panel):
             self.dragpos.x = 0
         if self.dragpos.y < 0:
             self.dragpos.y = 0
+        if self.img is None:
+            return
         if self.dragpos.x >= self.img.GetWidth():
             self.dragpos.x = self.img.GetWidth()-1
         if self.dragpos.y >= self.img.GetHeight():
@@ -403,7 +444,7 @@ class MPImagePanel(wx.Panel):
         '''pass events to the parent'''
         state = self.state
         if isinstance(event, wx.MouseEvent):
-            self.on_mouse_event(event)            
+            self.on_mouse_event(event)
         if isinstance(event, wx.KeyEvent):
             self.on_key_event(event)
         if (isinstance(event, wx.MouseEvent) and
@@ -424,7 +465,12 @@ class MPImagePanel(wx.Panel):
             ret = self.popup_menu.find_selected(event)
             if ret is not None:
                 ret.popup_pos = self.popup_pos
-                state.out_queue.put(ret)
+                if ret.returnkey == 'fitWindow':
+                    self.fit_to_window()
+                elif ret.returnkey == 'fullSize':
+                    self.full_size()
+                else:
+                    state.out_queue.put(ret)
                 return
         if self.menu is not None:
             ret = self.menu.find_selected(event)
@@ -446,6 +492,7 @@ class MPImagePanel(wx.Panel):
             self.wx_popup_menu = None
         else:
             self.wx_popup_menu = menu.wx_menu()
+            self.frame.Bind(wx.EVT_MENU, self.on_menu)
 
     def fit_to_window(self):
         '''fit image to window'''
@@ -461,7 +508,7 @@ class MPImagePanel(wx.Panel):
         self.dragpos = wx.Point(0, 0)
         self.zoom = 1.0
         self.need_redraw = True
-            
+
 if __name__ == "__main__":
     from optparse import OptionParser
     parser = OptionParser("mp_image.py <file>")
@@ -469,7 +516,7 @@ if __name__ == "__main__":
     parser.add_option("--drag", action='store_true', default=False, help="allow drag")
     parser.add_option("--autosize", action='store_true', default=False, help="auto size window")
     (opts, args) = parser.parse_args()
-    
+
     im = MPImage(mouse_events=True,
                  key_events=True,
                  can_drag = opts.drag,

@@ -7,6 +7,7 @@ November 2013
 '''
 
 import wx
+from MAVProxy.modules.lib import mp_util
 
 class MPMenuGeneric(object):
     '''a MP menu separator'''
@@ -19,7 +20,7 @@ class MPMenuGeneric(object):
     def _append(self, menu):
         '''append this menu item to a menu'''
         pass
-    
+
     def __str__(self):
         return "MPMenuGeneric()"
 
@@ -41,23 +42,33 @@ class MPMenuSeparator(MPMenuGeneric):
 
 class MPMenuItem(MPMenuGeneric):
     '''a MP menu item'''
-    def __init__(self, name, description='', returnkey=None):
+    def __init__(self, name, description='', returnkey=None, handler=None):
         MPMenuGeneric.__init__(self)
         self.name = name
         self.description = description
         self.returnkey = returnkey
-        
+        self.handler = handler
+        self.handler_result = None
+
     def find_selected(self, event):
         '''find the selected menu item'''
         if event.GetId() == self.id():
             return self
         return None
 
+    def call_handler(self):
+        '''optionally call a handler function'''
+        if self.handler is None:
+            return
+        call = getattr(self.handler, 'call', None)
+        if call is not None:
+            self.handler_result = call()
+
     def id(self):
         '''id used to identify the returned menu items
-        uses a 16 bit unsigned integer'''
-        # 0xFFFF is used as windows only allows for 16 bit IDs
-        return int(hash((self.name, self.returnkey)) & 0xFFFF)
+        uses a 16 bit signed integer'''
+        # 0x7FFF is used as windows only allows for 16 bit IDs
+        return int(hash((self.name, self.returnkey)) & 0x7FFF)
 
     def _append(self, menu):
         '''append this menu item to a menu'''
@@ -69,10 +80,10 @@ class MPMenuItem(MPMenuGeneric):
 
 class MPMenuCheckbox(MPMenuItem):
     '''a MP menu item as a checkbox'''
-    def __init__(self, name, description='', returnkey=None, checked=False):
-        MPMenuItem.__init__(self, name, description=description, returnkey=returnkey)
+    def __init__(self, name, description='', returnkey=None, checked=False, handler=None):
+        MPMenuItem.__init__(self, name, description=description, returnkey=returnkey, handler=handler)
         self.checked = checked
-        
+
     def find_selected(self, event):
         '''find the selected menu item'''
         if event.GetId() == self.id():
@@ -94,8 +105,8 @@ class MPMenuCheckbox(MPMenuItem):
 
 class MPMenuRadio(MPMenuItem):
     '''a MP menu item as a radio item'''
-    def __init__(self, name, description='', returnkey=None, selected=None, items=[]):
-        MPMenuItem.__init__(self, name, description=description, returnkey=returnkey)
+    def __init__(self, name, description='', returnkey=None, selected=None, items=[], handler=None):
+        MPMenuItem.__init__(self, name, description=description, returnkey=returnkey, handler=handler)
         self.items = items
         self.choice = 0
         self.initial = selected
@@ -126,7 +137,7 @@ class MPMenuRadio(MPMenuItem):
             if self.items[i] == self.initial:
                 submenu.Check(self.id()+i, True)
         menu.AppendMenu(-1, self.name, submenu)
-        
+
     def __str__(self):
         return "MPMenuRadio(%s,%s,%s,%s)" % (self.name, self.description, self.returnkey, self.get_choice())
 
@@ -137,12 +148,26 @@ class MPMenuSubMenu(MPMenuGeneric):
         MPMenuGeneric.__init__(self)
         self.name = name
         self.items = items
-        
+
     def add(self, items, addto=None):
         '''add more items to a sub-menu'''
         if not isinstance(items, list):
             items = [items]
-        self.items.extend(items)
+        for m in items:
+            updated = False
+            for i in range(len(self.items)):
+                try:
+                    if self.items[i].name == m.name:
+                        self.items[i] = m
+                        updated = True
+                except Exception:
+                    pass
+            if not updated:
+                self.items.append(m)
+
+    def combine(self, submenu):
+        '''combine a new menu with an existing one'''
+        self.items.extend(submenu.items)
 
     def wx_menu(self):
         '''return a wx.Menu() for this menu'''
@@ -177,7 +202,14 @@ class MPMenuTop(object):
         '''add a submenu'''
         if not isinstance(items, list):
             items = [items]
-        self.items.extend(items)
+        for m in items:
+            updated = False
+            for i in range(len(self.items)):
+                if self.items[i].name == m.name:
+                    self.items[i] = m
+                    updated = True
+            if not updated:
+                self.items.append(m)
 
     def wx_menu(self):
         '''return a wx.MenuBar() for the menu'''
@@ -196,10 +228,58 @@ class MPMenuTop(object):
                 return ret
         return None
 
+class MPMenuCallFileDialog(object):
+    '''used to create a file dialog callback'''
+    def __init__(self, flags=wx.FD_OPEN, title='Filename', wildcard='*.*'):
+        self.flags = flags
+        self.title = title
+        self.wildcard = wildcard
 
+    def call(self):
+        '''show a file dialog'''
+        dlg = wx.FileDialog(None, self.title, '', "", self.wildcard, self.flags)
+        if dlg.ShowModal() != wx.ID_OK:
+            return None
+        return dlg.GetPath()
+
+class MPMenuCallTextDialog(object):
+    '''used to create a value dialog callback'''
+    def __init__(self, title='Enter Value', default=''):
+        self.title = title
+        self.default = default
+
+    def call(self):
+        '''show a value dialog'''
+        dlg = wx.TextEntryDialog(None, self.title, self.title, defaultValue=str(self.default))
+        if dlg.ShowModal() != wx.ID_OK:
+            return None
+        return dlg.GetValue()
+
+class MPMenuChildMessageDialog(object):
+    '''used to create a message dialog in a child process'''
+    def __init__(self, title='Information', message='', font_size=18):
+        self.title = title
+        self.message = message
+        self.font_size = font_size
+        
+        import multiprocessing
+        t = multiprocessing.Process(target=self.show)
+        t.start()
+
+    def show(self):
+        '''show the dialog as a child process'''
+        mp_util.child_close_fds()
+        from wx.lib.agw.genericmessagedialog import GenericMessageDialog
+        app = wx.PySimpleApp()
+        # note! font size change is not working. I don't know why yet
+        font = wx.Font(self.font_size, wx.MODERN, wx.NORMAL, wx.NORMAL)
+        dlg = GenericMessageDialog(None, self.message, self.title, wx.ICON_INFORMATION|wx.OK)
+        dlg.SetFont(font)
+        dlg.ShowModal()
+        app.MainLoop()
 
 if __name__ == '__main__':
-    from MAVProxy.modules.mavproxy_map.mp_image import MPImage
+    from MAVProxy.modules.lib.mp_image import MPImage
     import time
     im = MPImage(mouse_events=True,
                  key_events=True,
@@ -223,7 +303,7 @@ if __name__ == '__main__':
                                                        items=['Red','Green','Blue']),
                                            MPMenuRadio('Shapes',
                                                        items=['Circle','Square','Triangle'])])])
-    
+
     im.set_menu(menu)
 
     popup = MPMenuSubMenu('A Popup',
@@ -232,7 +312,7 @@ if __name__ == '__main__':
                                  MPMenuItem('Sub3')])
 
     im.set_popup_menu(popup)
-    
+
     while im.is_alive():
         for event in im.events():
             if isinstance(event, MPMenuItem):
@@ -241,4 +321,3 @@ if __name__ == '__main__':
             else:
                 print(event)
         time.sleep(0.1)
-        

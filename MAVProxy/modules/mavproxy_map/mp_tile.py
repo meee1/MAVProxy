@@ -35,21 +35,17 @@ class TileException(Exception):
 TILE_SERVICES = {
 	# thanks to http://go2log.com/2011/09/26/fetching-tiles-for-offline-map/
 	# for the URL mapping info
-	"GoogleSat"      : "http://khm${GOOG_DIGIT}.google.com/kh/v=131&src=app&x=${X}&y=${Y}&z=${ZOOM}&s=${GALILEO}",
-	"GoogleMap"      : "http://mt${GOOG_DIGIT}.google.com/vt/lyrs=m@121&hl=en&x=${X}&y=${Y}&z=${ZOOM}&s=${GALILEO}",
-	"GoogleHyb"      : "http://mt${GOOG_DIGIT}.google.com/vt/lyrs=h@121&hl=en&x=${X}&y=${Y}&z=${ZOOM}&s=${GALILEO}",
-	"GoogleTer"      : "http://mt${GOOG_DIGIT}.google.com/vt/lyrs=t@108,r@121&hl=en&x=${X}&y=${Y}&z=${ZOOM}&s=${GALILEO}",
+	"GoogleSat"      : "https://khm${GOOG_DIGIT}.google.com/kh/v=157&hl=pt-PT&x=${X}&y=${Y}&z=${ZOOM}&s=${GALILEO}",
+	"GoogleMap"      : "https://mt${GOOG_DIGIT}.google.com/vt/lyrs=m@132&hl=pt-PT&x=${X}&y=${Y}&z=${ZOOM}&s=${GALILEO}",
+	"GoogleTer"      : "https://mt${GOOG_DIGIT}.google.com/vt/v=t@132,r@249&hl=pt-PT&x=${X}&y=${Y}&z=${ZOOM}&s=${GALILEO}",
 	"GoogleChina"    : "http://mt${GOOG_DIGIT}.google.cn/vt/lyrs=m@121&hl=en&gl=cn&x=${X}&y=${Y}&z=${ZOOM}&s=${GALILEO}",
-	"YahooMap"       : "http://maps${Y_DIGIT}.yimg.com/hx/tl?v=4.3&.intl=en&x=${X}&y=${YAHOO_Y}&z=${YAHOO_ZOOM}&r=1",
-	"YahooSat"       : "http://maps${Y_DIGIT}.yimg.com/ae/ximg?v=1.9&t=a&s=256&.intl=en&x=${X}&y=${YAHOO_Y}&z=${YAHOO_ZOOM}&r=1",
-	"YahooInMap"     : "http://maps.yimg.com/hw/tile?locale=en&imgtype=png&yimgv=1.2&v=4.1&x=${X}&y=${YAHOO_Y}&z=${YAHOO_ZOOM_2}",
-	"YahooInHyb"     : "http://maps.yimg.com/hw/tile?imgtype=png&yimgv=0.95&t=h&x=${X}&y=${YAHOO_Y}&z=${YAHOO_ZOOM_2}",
-	"YahooHyb"       : "http://maps${Y_DIGIT}.yimg.com/hx/tl?v=4.3&t=h&.intl=en&x=${X}&y=${YAHOO_Y}&z=${YAHOO_ZOOM}&r=1",
 	"MicrosoftBrMap" : "http://imakm${MS_DIGITBR}.maplink3.com.br/maps.ashx?v=${QUAD}|t&call=2.2.4",
 	"MicrosoftHyb"   : "http://ecn.t${MS_DIGIT}.tiles.virtualearth.net/tiles/h${QUAD}.png?g=441&mkt=en-us&n=z",
 	"MicrosoftSat"   : "http://ecn.t${MS_DIGIT}.tiles.virtualearth.net/tiles/a${QUAD}.png?g=441&mkt=en-us&n=z",
 	"MicrosoftMap"   : "http://ecn.t${MS_DIGIT}.tiles.virtualearth.net/tiles/r${QUAD}.png?g=441&mkt=en-us&n=z",
 	"MicrosoftTer"   : "http://ecn.t${MS_DIGIT}.tiles.virtualearth.net/tiles/r${QUAD}.png?g=441&mkt=en-us&shading=hill&n=z",
+        "OviSat"         : "http://maptile.maps.svc.ovi.com/maptiler/v2/maptile/newest/satellite.day/${Z}/${X}/${Y}/256/png8",
+        "OviHybrid"      : "http://maptile.maps.svc.ovi.com/maptiler/v2/maptile/newest/hybrid.day/${Z}/${X}/${Y}/256/png8",
 	"OpenStreetMap"  : "http://tile.openstreetmap.org/${ZOOM}/${X}/${Y}.png",
 	"OSMARender"     : "http://tah.openstreetmap.org/Tiles/tile/${ZOOM}/${X}/${Y}.png",
 	"OpenAerialMap"  : "http://tile.openaerialmap.org/tiles/?v=mgm&layer=openaerialmap-900913&x=${X}&y=${Y}&zoom=${OAM_ZOOM}",
@@ -76,9 +72,6 @@ class TileServiceInfo:
 			quadcode += str((((((y >> i) & 1) << 1) + ((x >> i) & 1))))
 		self.ZOOM = zoom
 		self.QUAD = quadcode
-		self.YAHOO_Y = 2**(zoom-1) - 1 - y
-		self.YAHOO_ZOOM = zoom + 1
-		self.YAHOO_ZOOM_2 = 17 - zoom + 1
 		self.OAM_ZOOM = 17 - zoom
 		self.GOOG_DIGIT = (x + y) & 3
 		self.MS_DIGITBR = (((y & 1) << 1) + (x & 1)) + 1
@@ -196,7 +189,13 @@ class MPTile:
 		self._download_thread = None
                 self._loading = mp_icon('loading.jpg')
 		self._unavailable = mp_icon('unavailable.jpg')
-		self._tile_cache = collections.OrderedDict()
+		try:
+			self._tile_cache = collections.OrderedDict()
+		except AttributeError:
+			# OrderedDicts in python 2.6 come from the ordereddict module
+			# which is a 3rd party package, not in python2.6 distribution
+			import ordereddict
+			self._tile_cache = ordereddict.OrderedDict()
 
         def set_service(self, service):
                 '''set tile service'''
@@ -211,6 +210,10 @@ class MPTile:
                 service_list = TILE_SERVICES.keys()
                 service_list.sort()
                 return service_list
+
+        def set_download(self, download):
+                '''set download enable'''
+                self.download = download
 
 	def coord_to_tile(self, lat, lon, zoom):
 		'''convert lat/lon/zoom to a TileInfo'''
@@ -258,17 +261,22 @@ class MPTile:
 			try:
 				if self.debug:
 					print("Downloading %s [%u left]" % (url, len(keys)))
-				resp = urllib2.urlopen(url)
+                                req = urllib2.Request(url)
+                                if url.find('google') != -1:
+                                        req.add_header('Referer', 'https://maps.google.com/')
+				resp = urllib2.urlopen(req)
 				headers = resp.info()
 			except urllib2.URLError as e:
 				#print('Error loading %s' % url)
-				self._tile_cache[key] = self._unavailable
+                                if not key in self._tile_cache:
+                                        self._tile_cache[key] = self._unavailable
 				self._download_pending.pop(key)
 				if self.debug:
 					print("Failed %s: %s" % (url, str(e)))
 				continue
 			if 'content-type' not in headers or headers['content-type'].find('image') == -1:
-				self._tile_cache[key] = self._unavailable
+                                if not key in self._tile_cache:
+                                        self._tile_cache[key] = self._unavailable
 				self._download_pending.pop(key)
 				if self.debug:
 					print("non-image response %s" % url)
@@ -281,7 +289,8 @@ class MPTile:
 			if md5 in BLANK_TILES:
 				if self.debug:
 					print("blank tile %s" % url)
-				self._tile_cache[key] = self._unavailable
+                                if not key in self._tile_cache:
+                                        self._tile_cache[key] = self._unavailable
 				self._download_pending.pop(key)
 				continue
 
@@ -345,6 +354,10 @@ class MPTile:
 					continue
 
 			# copy out the quadrant we want
+                        availx = min(TILES_WIDTH - tile_info.offsetx, width2)
+                        availy = min(TILES_HEIGHT - tile_info.offsety, height2)
+                        if availx != width2 or availy != height2:
+                                continue
 			cv.SetImageROI(img, (tile_info.offsetx, tile_info.offsety, width2, height2))
 			img2 = cv.CreateImage((width2,height2), 8, 3)
                         try:
@@ -550,7 +563,10 @@ def mp_icon(filename):
         # when we may be in a package zip file
         try:
                 import pkg_resources
-                raw = pkg_resources.resource_stream(__name__, "data/%s" % filename).read()
+                name = __name__
+                if name == "__main__":
+                        name = "MAVProxy.modules.mavproxy_map.mp_tile"
+                raw = pkg_resources.resource_stream(name, "data/%s" % filename).read()
         except Exception:
                 raw = open(os.path.join(__file__, 'data', filename)).read()
         imagefiledata = cv.CreateMatHeader(1, len(raw), cv.CV_8UC1)
@@ -566,7 +582,7 @@ if __name__ == "__main__":
 	parser.add_option("--lat", type='float', default=-35.362938, help="start latitude")
 	parser.add_option("--lon", type='float', default=149.165085, help="start longitude")
 	parser.add_option("--width", type='float', default=1000.0, help="width in meters")
-	parser.add_option("--service", default="YahooSat", help="tile service")
+	parser.add_option("--service", default="OviHybrid", help="tile service")
 	parser.add_option("--zoom", default=None, type='int', help="zoom level")
 	parser.add_option("--max-zoom", type='int', default=19, help="maximum tile zoom")
 	parser.add_option("--delay", type='float', default=1.0, help="tile download delay")
