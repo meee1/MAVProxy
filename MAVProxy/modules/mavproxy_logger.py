@@ -6,12 +6,12 @@ import types
 import sys
 from pymavlink import mavutil
 import random
+import array
 
 from MAVProxy.modules.lib import mp_module
 from MAVProxy.modules.lib import mp_util
 import time
 from MAVProxy.modules.lib import mp_settings
-
 
 class logger(mp_module.MPModule):
     def __init__(self, mpstate):
@@ -90,8 +90,8 @@ class logger(mp_module.MPModule):
         self.download = 0
         self.prev_download = 0
         self.start = time.time()
-        self.missing_blocks = {}
-        self.acking_blocks = {}
+        self.missing_blocks = set()
+        self.acking_blocks = set()
         self.blocks_to_ack_and_nack = []
         self.missing_found = 0
         self.abandoned = 0
@@ -127,7 +127,7 @@ class logger(mp_module.MPModule):
 #                print("DFLogger: ACKing block (%d)" % (block,))
                 self.master.mav.remote_log_block_status_send(block,status)
                 blocks_sent += 1
-                del self.acking_blocks[block]
+                self.acking_blocks.discard(block)
                 del self.blocks_to_ack_and_nack[i]
                 continue
 
@@ -142,7 +142,7 @@ class logger(mp_module.MPModule):
                now - first_sent > 60:
                 print("DFLogger: Abandoning block (%d)" % (block,))
                 del self.blocks_to_ack_and_nack[i]
-                del self.missing_blocks[block]
+                self.missing_blocks.discard(block)
                 self.abandoned += 1
                 continue
 
@@ -189,7 +189,7 @@ class logger(mp_module.MPModule):
                 self.new_log_started = True
             if self.new_log_started == True:
                 size = m.block_size
-                data = ''.join(str(chr(x)) for x in m.data[:size])
+                data = array.array('B', m.data[:size])
                 ofs = size*(m.block_cnt)
                 self.logfile.seek(ofs)
                 self.logfile.write(data)
@@ -197,10 +197,10 @@ class logger(mp_module.MPModule):
                 if m.block_cnt in self.missing_blocks:
                     if self.log_settings.verbose:
                         print("DFLogger: Received missing block: %d" % (m.block_cnt,))
-                    del self.missing_blocks[m.block_cnt]
+                    self.missing_blocks.discard(m.block_cnt)
                     self.missing_found += 1
                     self.blocks_to_ack_and_nack.append([self.master,m.block_cnt,1,now,None])
-                    self.acking_blocks[m.block_cnt] = 1
+                    self.acking_blocks.add(m.block_cnt)
 #                    print("DFLogger: missing blocks: %s" % (str(self.missing_blocks),))
                 else:
                     # ACK the block we just got:
@@ -211,13 +211,13 @@ class logger(mp_module.MPModule):
                         pass
                     else:
                         self.blocks_to_ack_and_nack.append([self.master,m.block_cnt,1,now,None])
-                        self.acking_blocks[m.block_cnt] = 1
+                        self.acking_blocks.add(m.block_cnt)
                         # NACK any blocks we haven't seen and should have:
                         if(m.block_cnt - self.block_cnt > 1):
                             for block in range(self.block_cnt+1, m.block_cnt):
                                 if block not in self.missing_blocks and \
                                    block not in self.acking_blocks:
-                                    self.missing_blocks[block] = 1
+                                    self.missing_blocks.add(block)
                                     if self.log_settings.verbose:
                                         print "DFLogger: setting %d for nacking" % (block,)
                                     self.blocks_to_ack_and_nack.append([self.master,block,0,now,None])
