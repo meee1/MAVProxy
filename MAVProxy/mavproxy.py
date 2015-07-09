@@ -195,16 +195,18 @@ class MPState(object):
         '''return the currently chosen mavlink master object'''
         if len(self.mav_master) == 0:
               return None
-        if self.settings.link > len(self.mav_master):
+        link = self.settings.link
+        if link > len(self.mav_master):
             self.settings.link = 1
+            link = self.settings.link
 
         # try to use one with no link error
-        if not self.mav_master[self.settings.link-1].linkerror:
-            return self.mav_master[self.settings.link-1]
+        if not self.mav_master[link-1].linkerror:
+            return self.mav_master[link-1]
         for m in self.mav_master:
             if not m.linkerror:
                 return m
-        return self.mav_master[self.settings.link-1]
+        return self.mav_master[link-1]
 
 
 def get_mav_param(param, default=None):
