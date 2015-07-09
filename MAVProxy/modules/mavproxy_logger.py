@@ -152,7 +152,8 @@ class logger(mp_module.MPModule):
                 if now - last_sent < 0.1:
                     continue
 
-            print("DFLogger: NACKing block (%d)" % (block,))
+            if self.log_settings.verbose:
+                print("DFLogger: NACKing block (%d)" % (block,))
             self.master.mav.remote_log_block_status_send(block,status)
             blocks_sent += 1
             stuff[4] = now
