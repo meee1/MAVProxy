@@ -2,9 +2,25 @@ from setuptools import setup
 
 version = "1.5.1"
 
+import os
+def package_files(directory):
+    paths = []
+    for (path, directories, filenames) in os.walk(directory):
+        for filename in filenames:
+            paths.append(os.path.join('..', path, filename))
+    return paths
+
+package_data = ['modules/mavproxy_map/data/*.jpg', 
+                'modules/mavproxy_map/data/*.png',
+                'tools/graphs/*.xml',
+                'modules/mavproxy_cesium/app/api_keys.txt',
+                'modules/mavproxy_cesium/app/templates/*',
+]
+package_data.extend(package_files('MAVProxy/modules/mavproxy_cesium/app/static'))
+
 setup(name='MAVProxy',
       version=version,
-      zip_safe=True,
+      zip_safe=False,
       description='MAVProxy MAVLink ground station',
       long_description='''A MAVLink protocol proxy and ground station. MAVProxy
 is oriented towards command line operation, and is suitable for embedding in
@@ -31,6 +47,8 @@ on how to use MAVProxy.''',
       license='GPLv3',
       packages=['MAVProxy',
                 'MAVProxy.modules',
+                'MAVProxy.modules.mavproxy_cesium',
+                'MAVProxy.modules.mavproxy_cesium.app',
                 'MAVProxy.modules.mavproxy_map',
                 'MAVProxy.modules.mavproxy_misseditor',
                 'MAVProxy.modules.mavproxy_smartcamera',
@@ -47,9 +65,9 @@ on how to use MAVProxy.''',
                'MAVProxy/tools/mavflightview.py',
                'MAVProxy/tools/MAVExplorer.py',
                'MAVProxy/modules/mavproxy_map/mp_slipmap.py',
-               'MAVProxy/modules/mavproxy_map/mp_tile.py'],
+               'MAVProxy/modules/mavproxy_map/mp_tile.py',
+               'MAVProxy/modules/mavproxy_cesium/app/cesium_web_server.py',
+      ],
       package_data={'MAVProxy':
-                    ['modules/mavproxy_map/data/*.jpg', 
-                     'modules/mavproxy_map/data/*.png',
-                     'tools/graphs/*.xml']}
+                    package_data}
     )
